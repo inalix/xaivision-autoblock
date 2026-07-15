@@ -1,0 +1,866 @@
+import sys
+sys.path.append('/app/yolov5')
+
+import threading
+import time
+import os
+import requests
+import queue
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
+from io import BufferedReader, BytesIO
+
+import cv2
+import torch
+import numpy as np
+from flask import Flask, Response
+
+from deep_sort_realtime.deepsort_tracker import DeepSort
+from sort import Sort as SimpleSort
+from norfair import Detection, Tracker
+
+from utils.general import non_max_suppression
+from utils.torch_utils import select_device
+from jimbo.utils import settings, get_data_target_url
+from jimbo.capturer import Video, Camera
+from jimbo.logger import logger
+
+app = Flask(__name__)
+app.jimbo = None
+utc = ZoneInfo('UTC')
+
+
+class Jimbo:
+    tracker_lib = 'NORFAIR'
+    parked_airplanes = {}
+
+    def __init__(self, batch_size: int = 2):
+        self.batch_size: int = batch_size
+        self.initial_settings()
+
+    def get_tracker(self):
+        if self.tracker_lib == 'NORFAIR':
+            return Tracker(distance_function=self.tracker_lib_distance,
+                           distance_threshold=self.tracker_lib_distance_threshold)
+        elif self.tracker_lib == 'SORT':
+            return Sort(max_age=5)
+        elif self.tracker_lib == 'DEEPSORT':
+            return DeepSort(max_age=5)
+
+    def initial_settings(self):
+        self.parking_position: List[int] = [int(i) for i in settings.PARKING_POSITION.split(',')]
+        self.parking_label: str = settings.PARKING_LABEL
+        self.show_parking_area = settings.SHOW_PARKING_AREA
+
+        self.device = select_device('')
+        self.model_path: str = settings.MODEL_PATH
+        self.model = torch.hub.load(
+            '/app/yolov5', 'custom', path=self.model_path, source='local',
+            device=self.device)
+
+        # THRESHOLDS
+        self.airplane_stay_still_threshold = settings.AIRPLANE_STAY_STILL_THRESHOLD
+        self.nms_confidence_threshold = settings.NMS_CONFIDENCE_THRESHOLD
+        self.nms_iou_threshold = settings.NMS_IOU_THRESHOLD
+
+        self.tracker_lib: str = settings.TRACKER_LIB.upper()
+        self.tracker_lib_distance = settings.TRACKER_LIB_DISTANCE
+        self.tracker_lib_distance_threshold = settings.TRACKER_LIB_DISTANCE_THRESHOLD
+        self.tracker = self.get_tracker()
+        self.get_tracked_objects = self.get_tracked_objects_function()
+        self.get_bbox_and_track_id = self.get_bbox_and_track_id_function()
+
+        self.video_path: str = settings.VIDEO_PATH
+        self.target_fps: int = settings.TARGET_FPS
+        self.orig_shape = None
+        self.store_footage_image: bool = settings.STORE_FOOTAGE_IMAGE
+        self.store_footage_video: bool = settings.STORE_FOOTAGE_VIDEO
+        self.store_footage_video_secs: int = settings.STORE_FOOTAGE_VIDEO_SECS
+
+        self.local_images_save: bool = settings.LOCAL_IMAGES_SAVE
+        self.local_images_directory: str = settings.LOCAL_IMAGES_DIR
+        self.local_images_secs: int = settings.LOCAL_IMAGES_SECS
+
+        self.data_target: str = get_data_target_url()
+
+        # block settings
+        self.on_block_min_secs_on_bay = settings.ON_BLOCK_MIN_SECS_ON_BAY
+        self.off_block_max_overlap = settings.OFF_BLOCK_MAX_OVERLAP
+        self.on_bay_min_overlap = settings.ON_BAY_MIN_OVERLAP
+
+        # queues
+        self.frame_queue = queue.Queue(10)
+        self.processed_frame_queue = queue.Queue(5)
+        self.image_queue = queue.Queue(3)
+
+        # IMAGES TO STORE QUEUE
+        self.before_on_block_queue = queue.Queue(self.target_fps)
+        self.before_off_block_queue = queue.Queue(self.target_fps)
+        self.before_on_block_vid_queue = queue.Queue(self.target_fps * settings.STORE_FOOTAGE_VIDEO_SECS)
+        self.before_off_block_vid_queue = queue.Queue(self.target_fps * settings.STORE_FOOTAGE_VIDEO_SECS)
+        self.on_block_image = None
+
+        logger.info(f'DEVICE IS {self.device}')
+        logger.info(f'VIDEO_PATH {self.video_path}')
+        logger.info(f'PARKING_POSITION {self.parking_position}')
+        logger.info(f'MODEL_PATH {self.model_path}')
+        logger.info(f'DATA_TARGET_URL {self.data_target["cleaned"]}')
+
+    def to_xywh(self, bbox):
+        x1, y1, x2, y2 = bbox
+
+        return [x1, y1, x2-x1, y2-y1]
+
+    def preprocess_frame(self, frame):
+        gpu_frame = cv2.cuda_GpuMat()
+        gpu_frame.upload(frame)
+        img = cv2.cuda.resize(gpu_frame, (640, 640))  # Resize frame to 640x640
+        img = cv2.cuda.cvtColor(img, cv2.COLOR_BGR2RGB) # Convert BGR to RGB
+        img = img.download()
+        img = img.transpose(2, 0, 1) # transpose
+        img = np.ascontiguousarray(img)
+        img = torch.from_numpy(img).to(self.device).float() / 255.0
+        if img.ndimension() == 3:
+            img = img.unsqueeze(0)
+
+        return img
+
+    def rescale_bbox(self, bbox, orig_shape, new_shape=(640, 640)):
+        """
+        Rescale bounding box from new_shape back to orig_shape
+        """
+        gain = min(new_shape[0] / orig_shape[0], new_shape[1] / orig_shape[1])
+        pad = (
+            (new_shape[1] - orig_shape[1] * gain) / 2,
+            (new_shape[0] - orig_shape[0] * gain) / 2
+        )
+        bbox[:, [0, 2]] -= pad[0]
+        bbox[:, [1, 3]] -= pad[1]
+        bbox[:, :4] /= gain
+
+        return bbox
+
+    def convert_bbox_to_original_size(self, bbox, orig_shape):
+        """
+        Convert bounding box coordinates to the orig_shape
+        """
+        original_height, original_width = orig_shape
+
+        width_scale = original_width / 640
+        height_scale = original_height / 640
+
+        bbox_original = bbox.clone()
+        bbox_original[:, [0, 2]] *= width_scale
+        bbox_original[:, [1, 3]] *= height_scale
+
+        return bbox_original
+
+    def extract_yolo_detections(self, results):
+        bbox_xywh = []
+        cls_conf = []
+        cls_ids = []
+        for result in results:
+            if result is not None:
+                for det in result:
+                    x1, y1, x2, y2, conf, cls = det[:6]
+                    bbox_xywh.append([x1, y1, x2-x1, y2-y1])
+                    cls_conf.append(conf)
+                    cls_ids.append(int(cls))
+
+        if len(bbox_xywh) > 0:
+            bbox_xywh = torch.tensor(bbox_xywh, device=self.device)
+            cls_conf = torch.tensor(cls_conf, device=self.device)
+            cls_ids = torch.tensor(cls_ids, device=self.device)
+        else:
+            bbox_xywh = torch.empty((0, 4), device=self.device)
+            cls_conf = torch.empty((0,), device=self.device)
+            cls_ids = torch.empty((0,), device=self.device)
+
+        return bbox_xywh, cls_conf, cls_ids
+
+    def get_airplane_bay_overlap(self, bbox):
+        x1, y1, x2, y2 = self.parking_position
+        x, y, w, h = bbox
+
+        bbox_area = w * h
+        parking_area = (x2 - x1) * (y2 - y1)
+        if bbox_area == 0 or parking_area == 0:
+            return 0
+        
+        overlap_x1 = max(x1, x)
+        overlap_y1 = max(y1, y)
+        overlap_x2 = min(x2, x + w)
+        overlap_y2 = min(y2, y + h)
+        overlap_width = max(0, overlap_x2 - overlap_x1)
+        overlap_height = max(0, overlap_y2 - overlap_y1)
+        overlap_area = overlap_width * overlap_height
+
+        overlap_value = overlap_area / parking_area
+        # print(f'OVERLAP VALUE {overlap_value}')
+
+        return overlap_value
+
+    def is_still(self, bbox, last_position):
+        x, y, w, h = bbox
+        last_x, last_y, last_w, last_h = last_position
+
+        logger.info(f'BBOX {bbox}')
+        logger.info(f'LAST BBOX {last_position}')
+        threshold = 3.5
+        gapx = abs((x + w) - (last_x + last_w))
+        gapy = abs((y + h) - (last_y + last_h))
+        logger.info(f'IS STILL GAP {gapx}, {gapy}')
+        if gapx < threshold and gapy < threshold:
+            return True
+
+        return False
+
+    def get_before_image(self, block_type, filename):
+        if block_type == 'ON':
+            bef_queue = self.before_on_block_queue
+        else:
+            bef_queue = self.before_off_block_queue
+
+        if bef_queue.empty():
+            return
+
+        bret, bjpeg = cv2.imencode('.jpeg', bef_queue.get())
+        if not bret:
+            return
+
+        befimg_bytes = BytesIO(bjpeg.tobytes())
+        befimg_bytes.name = f'BEF_{filename}.jpg'
+        bef_image = BufferedReader(befimg_bytes)
+        return bef_image
+
+    def generate_video(self, block_type, filename):
+        if block_type == 'ON':
+            frame_queue = self.before_on_block_vid_queue
+        else:
+            frame_queue = self.before_off_block_vid_queue
+
+        if frame_queue.empty():
+            logger.info('EMPTY VIDEO FRAME')
+            return
+
+        frames = list(frame_queue.queue)
+        first_frame = frames[0]
+        height, width, layers = first_frame.shape
+        writer = cv2.VideoWriter_fourcc(*'avc1')
+        filename = f'/app/stored_videos/FOOTAGE_{filename}.mp4'
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        out_temp = cv2.VideoWriter(
+            filename, cv2.CAP_FFMPEG, writer, self.target_fps, (width, height))
+
+        if not out_temp.isOpened():
+            logger.info(f'Failed to open VideoWriter for file: {filename}')
+            return None
+
+        logger.info(f'PANJANG FRAME VIDEO {len(frames)}')
+        for frame in frames:
+            # print('NULIS FRAME')
+            out_temp.write(frame)
+
+        out_temp.release()
+        return filename
+
+    def post_data_thread(self, jpeg, block_type, block_time):
+        if not self.data_target['cleaned']:
+            logger.info('Not storing data (NO TARGET URL)')
+            return
+
+        # generating all footage files needed
+        print('START POST THREAD')
+        filename = block_time.strftime('%s%f')
+        files = set([])
+        if self.store_footage_image:
+            bef_image = self.get_before_image(block_type, filename)
+            if bef_image:
+                files.add(('images', (f'BEF_{filename}.jpg', bef_image, 'image/jpeg')))
+
+            img_bytes = BytesIO(jpeg)
+            img_bytes.name = f'{block_type}_{filename}.jpg'
+            image = BufferedReader(img_bytes)
+            files.add(('images', (f'{block_type}_{filename}.jpg', image, 'image/jpeg')))
+
+        video_file = None
+        if self.store_footage_video:
+            print('GENERATING VIDEO')
+            video_file = self.generate_video(block_type, filename)
+            if video_file:
+                files.add(('footage_video', (f'VID_{filename}.mp4', open(video_file, 'rb'), 'video/mp4')))
+
+        ses = requests.Session()
+        if self.data_target['auth']:
+            ses.auth = self.data_target['auth']
+
+        block_data = {
+            'block_type': block_type,
+            'block_time': block_time.isoformat(),
+            'bay': self.parking_label,
+        }
+
+        logger.info(f'POSTING DATA {block_type} {block_time}')
+        try:
+            resp = ses.post(
+                self.data_target['cleaned'], data=block_data,
+                files=files, headers=self.data_target['headers'])
+            logger.info(f'RESPONSE {resp.text}')
+        except Exception as e:
+            logger.error(f'ERROR save to target {e}')
+
+        if video_file:
+            if os.path.exists(video_file):
+                os.remove(video_file)
+
+    def generate_capture(self):
+        if '://' in self.video_path:
+            logger.info('USING CAMERA')
+            return Camera(self.video_path, self.target_fps, self.frame_queue)
+        logger.info('USING VIDEO')
+        return Video(self.video_path, self.target_fps, self.frame_queue)
+
+    def get_original_shape_and_frames(self):
+        frames = []
+
+        while len(frames) < self.batch_size:
+            if self.frame_queue.empty():
+                # logger.info('EMPTY')
+                time.sleep(0.1)
+                continue
+
+            frame = self.frame_queue.get()
+            frames.append(frame)
+            if self.orig_shape is None:
+                self.orig_shape = frame.shape[:2]
+
+        return frames
+
+    def get_tracked_objects_function(self):
+        if self.tracker_lib == 'NORFAIR':
+            return self.norfair_tracking_objects
+        elif self.tracker_lib == 'SORT':
+            return self.sort_tracking_objects
+        elif self.tracker_lib == 'DEEPSORT':
+            return self.deepsort_tracking_objects
+        raise ValueError('INVALID TRACKED')
+
+    def norfair_tracking_objects(self, bbox_xywh, cls_conf, cls_ids, frame):
+        # pake iou
+        detections: List[Detection] = []
+        if self.tracker_lib_distance == 'iou':
+            bbox_xywh = bbox_xywh.cpu().numpy()
+            cls_conf = cls_conf.cpu().numpy()
+            # logger.info(f'XYWH {bbox_xywh}')
+            for i, bbox in enumerate(bbox_xywh):
+                x1 = bbox[0]
+                y1 = bbox[1]
+                w = bbox[2]
+                h = bbox[3]
+                x2 = x1 + w
+                y2 = y1 + h
+                points = np.array(
+                    [
+                        [x1, y1], [x2, y2],
+                    ]
+                )
+                scores = np.array(
+                    [cls_conf[i], cls_conf[i]]
+                )
+                detections.append(Detection(points=points, scores=scores))
+        elif self.tracker_lib_distance == 'euclidean':
+            bbox_xywh = bbox_xywh.cpu().numpy()
+            cls_conf = cls_conf.cpu().numpy()
+            logger.info(f'XYWH {bbox_xywh}')
+            for i, bbox in enumerate(bbox_xywh):
+                x1 = bbox[0]
+                y1 = bbox[1]
+                w = bbox[2]
+                h = bbox[3]
+                x2 = x1 + w
+                y2 = y1 + h
+                points = np.array(
+                    [x1, y1, x2, y2]
+                )
+                detections.append(Detection(points=points))
+
+        return self.tracker.update(detections=detections)
+
+    def sort_tracking_objects(self, bbox_xywh, cls_conf, cls_ids, frame):
+        return self.tracker.update(bbox_xywh.numpy())
+
+    def deepsort_tracking_objects(self, bbox_xywh, cls_conf, cls_ids, frame):
+        cls_conf = cls_conf.cpu().numpy()
+        cls_ids = cls_ids.cpu().numpy()
+        detections = [
+            (list(v), cls_conf[i], cls_ids[i]) for i, v in enumerate(bbox_xywh.numpy())
+        ]
+        return self.tracker.update_tracks(detections, frame=frame)
+
+    def get_bbox_and_track_id_function(self):
+        if self.tracker_lib == 'NORFAIR':
+            return self.norfair_bbox_and_track_id
+        elif self.tracker_lib == 'SORT':
+            return self.sort_bbox_and_track_id
+        elif self.tracker_lib == 'DEEPSORT':
+            return self.deepsort_bbox_and_track_id
+        raise ValueError('INVALID TRACKED')
+
+    def norfair_bbox_and_track_id(self, tracked_object, idx):
+        if self.tracker_lib_distance == 'iou':
+            x1, y1 = tracked_object.estimate[0]
+            x2, y2 = tracked_object.estimate[1]
+            # logger.info(f'TRACKED {x1, y1, x2, y2}')
+            w = x2 - x1
+            h = y2 - y1
+            return [x1, y1, w, h], tracked_object.id
+        elif self.tracker_lib_distance == 'iou':
+            logger.info(f'TRACKED {tracked_object.estimate[0]}')
+            return tracked_object.estimate[0], tracked_object.id
+
+    def sort_bbox_and_track_id(self, tracked_object, idx):
+        return tracked_object[:4], tracked_object[4]
+
+    def deepsort_bbox_and_track_id(self, tracked_object, idx):
+        if not tracked_object.is_confirmed():
+            return
+
+        track_id = tracked_object.track_id
+        bbox = tracked_object.to_ltrb()
+        bbox = self.to_xywh(bbox)
+        return bbox, track_id
+
+    def draw_bbox_and_label(self, frame, bbox, bg_color, size,
+                            label=None, label_color=(0, 0, 0),
+                            bbox_type='xyxy'):
+
+        x1, y1, x2, y2 = bbox
+        if bbox_type == 'xywh':
+            x2 = x1 + x2
+            y2 = y1 + y2
+
+        if bg_color:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), bg_color, size)
+
+        if label:
+            labels = label.split('\n')
+            max_width = 0
+            max_height = 0
+            text_height = 0
+            for l in labels:
+                (text_width, text_height), baseline = cv2.getTextSize(
+                    l, cv2.FONT_HERSHEY_SIMPLEX, 0.5, size)
+                max_width = max(max_width, text_width)
+                max_height += text_height
+
+            if bg_color:
+                cv2.rectangle(frame, (x1, y1), (x1 + max_width, y1 + max_height + size), bg_color, -1)
+
+            for i, l in enumerate(labels, 1):
+                cv2.putText(frame, l, (x1, y1 + (text_height * i)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, size)
+
+    def process_on_block_data(self, bbox, track_id, frame):
+        if self.parked_airplanes[track_id]['on_block']:
+            return False
+
+        if self.before_on_block_queue.full():
+            self.before_on_block_queue.get()
+        self.before_on_block_queue.put(frame)
+
+        if self.before_on_block_vid_queue.full():
+            self.before_on_block_vid_queue.get()
+        self.before_on_block_vid_queue.put(frame)
+
+        now = datetime.now().replace(tzinfo=utc)
+        overlap_value = self.get_airplane_bay_overlap(bbox)
+
+        if overlap_value >= self.on_bay_min_overlap:
+            if not self.parked_airplanes[track_id]['on_bay']:
+                self.parked_airplanes[track_id]['on_bay'] = True
+                self.parked_airplanes[track_id]['on_bay_last_overlap'] = overlap_value
+                self.parked_airplanes[track_id]['on_bay_start'] = now
+                self.parked_airplanes[track_id]['on_bay_last_pos'] = bbox
+                self.parked_airplanes[track_id]['ever_off_bay'] += 1
+                return False
+        else:
+            self.parked_airplanes[track_id]['on_bay'] = False
+            self.parked_airplanes[track_id]['on_bay_last_overlap'] = 0
+            self.parked_airplanes[track_id]['on_bay_start'] = None
+            self.parked_airplanes[track_id]['on_bay_last_pos'] = None
+            self.parked_airplanes[track_id]['ever_off_bay'] += 1
+
+        if not self.parked_airplanes[track_id]['on_bay']:
+            self.parked_airplanes[track_id]['ever_off_bay'] += 1
+            return False
+
+        diff = (now - self.parked_airplanes[track_id]['on_bay_start']).total_seconds()
+        if diff < 1:
+            return False
+
+        # counting gap after 1 second
+        is_still = self.is_still(bbox, self.parked_airplanes[track_id]['on_bay_last_pos'])
+        self.parked_airplanes[track_id]['on_bay_start'] = now
+        self.parked_airplanes[track_id]['on_bay_last_pos'] = bbox
+        logger.info(f'IS STILL {is_still}')
+        if not is_still:
+            self.parked_airplanes[track_id]['on_block_still'] = 0
+            self.parked_airplanes[track_id]['ever_off_bay'] += 1
+            return False
+
+        self.parked_airplanes[track_id]['on_block_still'] += 1
+        # minimum stay still at n seconds consecutive COUNT AS BLOCK ON
+        if self.parked_airplanes[track_id]['on_block_still'] < self.on_block_min_secs_on_bay:
+            return False
+
+        if self.parked_airplanes[track_id]['ever_off_bay'] < 5:
+            # FAKED because ever off bay < 5
+            logger.info('FAKED ON BLOCK (ALREADY ON PARKING STAND)')
+            self.parked_airplanes[track_id]['on_block_real'] = False
+        else:
+            self.parked_airplanes[track_id]['on_block_real'] = True
+
+        on_block_time = now.replace(microsecond=0) - timedelta(seconds=self.on_block_min_secs_on_bay + 1)
+        self.parked_airplanes[track_id]['start_time'] = on_block_time
+        self.parked_airplanes[track_id]['on_block_time'] = on_block_time
+        self.parked_airplanes[track_id]['on_block'] = True
+        return is_still
+
+        # XXX ignored
+        '''
+        if not overlap_value < self.ON_BLOCK_MIN_OVERLAP:
+            self.parked_airplanes[track_id]['start_time'] = None
+
+        if self.is_on_block(bbox):
+            if self.parked_airplanes[track_id]['start_time'] is None:
+                self.parked_airplanes[track_id]['start_time'] =\
+                    now.replace(microsecond=0)
+            elif not self.parked_airplanes[track_id]['on_block_time']:
+                elapsed_time = now - self.parked_airplanes[track_id]['start_time']
+                elapsed_time = elapsed_time.total_seconds()
+                if elapsed_time >= self.SECONDS_ON_BLOCK_STOP:
+                    self.parked_airplanes[track_id]['on_block'] = True
+                    self.parked_airplanes[track_id]['on_block_time'] =\
+                        self.parked_airplanes[track_id]['start_time']
+
+                    logger.info(f'Airplane {track_id} is ON BLOCK')
+                    send_data_on_block = True
+                    if self.before_on_block_vid_queue.full():
+                        self.before_on_block_vid_queue.get()
+                    self.before_on_block_vid_queue.put(frame)
+        else:
+            self.parked_airplanes[track_id]['start_time'] = None
+
+        return send_data_on_block
+        '''
+
+    def process_off_block_data(self, bbox, track_id, frame):
+        send_data_off_block = False
+
+        if not self.parked_airplanes[track_id]['on_block']:
+            return False
+
+        if self.parked_airplanes[track_id]['off_block']:
+            return False
+
+        if self.before_off_block_vid_queue.full():
+            self.before_off_block_vid_queue.get()
+        self.before_off_block_vid_queue.put(frame)
+
+        if self.before_off_block_queue.full():
+            self.before_off_block_queue.get()
+        self.before_off_block_queue.put(frame)
+
+        now = datetime.now().replace(tzinfo=utc)
+        overlap_ratio = self.get_airplane_bay_overlap(bbox)
+
+        if overlap_ratio <= self.off_block_max_overlap:
+            self.parked_airplanes[track_id]['off_block'] = True
+            if self.parked_airplanes[track_id]['off_block_start']:
+                off_block_time = self.parked_airplanes[track_id]['off_block_start'].replace(microsecond=0)
+                off_block_time -= timedelta(seconds=3)
+            else:
+                off_block_time = now.replace(microsecond=0) - timedelta(seconds=8)
+            self.parked_airplanes[track_id]['off_block_time'] = off_block_time
+            return True
+
+        if not self.parked_airplanes[track_id]['off_block_counting_start']:
+            self.parked_airplanes[track_id]['off_block_counting_start'] = now
+            self.parked_airplanes[track_id]['off_block_last_overlap'] = overlap_ratio
+
+        diff = (now - self.parked_airplanes[track_id]['off_block_counting_start']).total_seconds()
+        if diff < 2:
+            return False
+
+        # counting gap after 2 seconds
+        gap = abs(self.parked_airplanes[track_id]['off_block_last_overlap'] - overlap_ratio)
+        self.parked_airplanes[track_id]['off_block_counting_start'] = now
+        self.parked_airplanes[track_id]['off_block_last_overlap'] = overlap_ratio
+        if gap >= 0.15:
+            if not self.parked_airplanes[track_id]['off_block_start']:
+                self.parked_airplanes[track_id]['off_block_start'] = now
+        else:
+            self.parked_airplanes[track_id]['off_block_start'] = None
+
+        return False
+
+        # XXX ignored
+        '''
+        overlap_ratio = self.get_airplane_bay_overlap(bbox)
+        if overlap_ratio > self.OFF_BLOCK_MIN_OVERLAP + 0.05:
+            self.parked_airplanes[track_id]['off_block_min_overlapped'] = None
+
+            if self.before_off_block_queue.full():
+                self.before_off_block_queue.get()
+            self.before_off_block_queue.put(frame)
+
+        if overlap_ratio <= self.OFF_BLOCK_MIN_OVERLAP\
+                and not self.parked_airplanes[track_id]['off_block_min_overlapped']:
+
+            self.parked_airplanes[track_id]['off_block_min_overlapped'] =\
+                now.replace(microsecond=0)
+
+        if overlap_ratio <= self.OFF_BLOCK_MAX_OVERLAP\
+                and self.parked_airplanes[track_id]['off_block_min_overlapped']:
+            self.parked_airplanes[track_id]['off_block_max_overlapped'] =\
+                now.replace(microsecond=0)
+
+        if self.parked_airplanes[track_id]['off_block_max_overlapped']\
+                and not self.parked_airplanes[track_id]['off_block_time']:
+            self.parked_airplanes[track_id]['off_block'] = True
+            self.parked_airplanes[track_id]['off_block_time'] =\
+                self.parked_airplanes[track_id]['off_block_min_overlapped']
+
+            logger.info(f'Airplane {track_id} is OFF BLOCK')
+            send_data_off_block = True
+            if self.before_off_block_vid_queue.full():
+                self.before_off_block_vid_queue.get()
+            self.before_off_block_vid_queue.put(frame)
+
+        return send_data_off_block
+        '''
+
+    def frame_processing_thread(self):
+        while True:
+            frames = self.get_original_shape_and_frames()
+
+            if not frames:
+                time.sleep(1)
+                continue
+
+            preprocessed_frames = torch.cat(
+                    [self.preprocess_frame(frame) for frame in frames]
+                ).to(self.device)
+
+            with torch.no_grad():
+                results = self.model(preprocessed_frames, augment=False)
+                results = non_max_suppression(
+                    results, conf_thres=self.nms_confidence_threshold,
+                    iou_thres=self.nms_iou_threshold, classes=[0])
+
+            frame_height, frame_width = self.orig_shape
+
+            for i, frame in enumerate(frames):
+                # logger.info(f'PROCESSING FRAME {i}')
+                result = results[i]
+
+                # draw jam with outline
+                clock = datetime.now().replace(tzinfo=utc).strftime('%Y/%m/%d %H:%M:%S UTC')
+                self.draw_bbox_and_label(
+                    frame, (5, frame_height - 16, 100, frame_height - 16), None, 4,
+                    label=clock, label_color=(255, 255, 255))
+                self.draw_bbox_and_label(
+                    frame, (5, frame_height - 16, 100, frame_height - 16), None, 2,
+                    label=clock)
+
+                # draw parkiran
+                if self.show_parking_area:
+                    self.draw_bbox_and_label(
+                        frame, self.parking_position, (0, 255, 0), 1,
+                        label=f'BAY: {self.parking_label}')
+
+                # Extract detections
+                bbox_xywh_original, cls_conf, cls_ids = self.extract_yolo_detections([result])
+                if bbox_xywh_original.numel() == 0:
+                    if self.processed_frame_queue.full():
+                        self.processed_frame_queue.get()
+                    self.processed_frame_queue.put((frame, {}))
+                    continue
+
+                bbox_xywh = self.convert_bbox_to_original_size(
+                    bbox_xywh_original.cpu(), self.orig_shape)
+                tracked_objects = self.get_tracked_objects(
+                    bbox_xywh, cls_conf, cls_ids, frame)
+                data_block = {}
+
+                for idx, tracked_object in enumerate(tracked_objects):
+                    # print(f'OUTPUT {tracked_object}, {idx}')
+                    bbox_and_id = self.get_bbox_and_track_id(tracked_object, idx)
+                    if bbox_and_id is None:
+                        continue
+
+                    # Draw bounding box
+                    bbox, track_id = bbox_and_id
+                    bbox_list = [int(coord) for coord in bbox]
+                    # logger.info(f'BBOX LIST {bbox_list}')
+                    conf_idx = i
+                    if i >= len(cls_conf):
+                        conf_idx = len(cls_conf) - 1
+                    # Create the text with ID and precision percentage
+                    confidence = int(float(f'{cls_conf[conf_idx]:.2f}') * 100)
+                    label = f'AIRCRAFT: {track_id} ({confidence}%)'
+
+                    if track_id not in self.parked_airplanes:
+                        self.parked_airplanes[track_id] = {
+                            'start_time': None,
+                            'on_block': False,
+                            'on_block_time': None,
+                            'on_block_real': True,
+                            'on_block_still': 0,
+                            'ever_off_bay': 0,
+                            'on_bay': False,
+                            'on_bay_last_overlap': 0,
+                            'on_bay_start': None,
+                            'on_bay_last_pos': None,
+
+                            'off_block': False,
+                            'off_block_time': None,
+                            'last_position': bbox,
+                            # 'off_block_min_overlapped': None,
+                            # 'off_block_max_overlapped': None,
+                            'off_block_last_overlap': 0,
+                            'off_block_counting_start': None,
+                            'off_block_start': None,
+                        }
+
+                    send_data_on_block = self.process_on_block_data(bbox, track_id, frame)
+                    send_data_off_block = self.process_off_block_data(bbox, track_id, frame)
+                    if send_data_on_block and self.parked_airplanes[track_id]['on_block_real']:
+                        data_block = {
+                            'type': 'ON',
+                            'time': self.parked_airplanes[track_id]['on_block_time']
+                        }
+                    if send_data_off_block:
+                        data_block = {
+                            'type': 'OFF',
+                            'time': self.parked_airplanes[track_id]['off_block_time']
+                        }
+
+                    if self.parked_airplanes[track_id]['on_block_time']:
+                        if self.parked_airplanes[track_id]['on_block_real']:
+                            label_on_block = self.parked_airplanes[track_id]['on_block_time'].isoformat()
+                        else:
+                            label_on_block = 'ON BLOCK TIME NOT RECORDED'
+                        label += f'\nON BLOCK: {label_on_block}'
+                    if self.parked_airplanes[track_id]['off_block_time']:
+                        label += '\nOFF BLOCK: {}'.format(
+                            self.parked_airplanes[track_id]['off_block_time'].isoformat())
+
+                    self.draw_bbox_and_label(
+                        frame, bbox_list, (255, 0, 0), 1, label=label,
+                        label_color=(255, 255, 255), bbox_type='xywh')
+
+                    self.parked_airplanes[track_id]['last_position'] = bbox
+                    # print(f'XDATA {data_block}')
+
+                if self.processed_frame_queue.full():
+                    self.processed_frame_queue.get()
+                self.processed_frame_queue.put((frame, data_block))
+
+    def clean_local_images_dir(self):
+        os.makedirs(self.local_images_directory, exist_ok=True)
+        files = list(Path(self.local_images_directory).glob('*'))
+
+        # Sort files by filename
+        files.sort(key=lambda x: x.name)
+        delete_count = len(files) - (self.local_images_secs * self.target_fps)
+
+        # Delete the oldest files if there are more than 'seconds * target_fps' files
+        if delete_count > 0:
+            for file in files[:delete_count]:
+                try:
+                    os.remove(file)
+                    # print(f"Deleted {file}")
+                except Exception as e:
+                    print(f"Failed to delete {file}: {e}")
+
+    def image_processing_thread(self):
+        last_data = None
+        while True:
+            if self.processed_frame_queue.empty():
+                time.sleep(0.05)
+                continue
+
+            frame, data = self.processed_frame_queue.get()
+            ret, jpeg = cv2.imencode('.jpeg', frame)
+            if data:
+                last_data = data
+
+            if not ret:
+                continue
+
+            jpeg = jpeg.tobytes()
+            # print(f'DATA {last_data}')
+            if last_data:
+                logger.info(f'POST WOE {last_data}')
+                post_data = threading.Thread(
+                    target=self.post_data_thread,
+                    args=(jpeg, last_data['type'], last_data['time']))
+                post_data.start()
+                last_data = None
+
+            if self.local_images_save:
+                os.makedirs(self.local_images_directory, exist_ok=True)
+                imagename = f'{int(time.time() * 1_000_000)}.jpg'
+                imagename = os.path.join(self.local_images_directory, imagename)
+                with open(imagename, 'wb') as f:
+                    f.write(jpeg)
+
+                self.clean_local_images_dir()
+
+            x = (b'--frame\r\n'
+                 b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n\r\n')
+            if self.image_queue.full():
+                self.image_queue.get()
+            self.image_queue.put(x)
+
+    def start(self):
+        vid = self.generate_capture()
+        vid.start_capture()
+        frame_processing = threading.Thread(target=self.frame_processing_thread)
+        image_processing = threading.Thread(target=self.image_processing_thread)
+        frame_processing.start()
+        image_processing.start()
+
+
+@app.route('/video_feed')
+def video_feed():
+    if not app.jimbo:
+        return Response('No Images for you!')
+
+    def generate():
+        while True:
+            if app.jimbo.image_queue.empty():
+                time.sleep(0.1)
+                continue
+            yield app.jimbo.image_queue.get()
+
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/hello')
+def hello():
+    return Response('OK')
+
+def main():
+    jimbo = Jimbo(batch_size=1)
+    jimbo.start()
+    app.jimbo = jimbo
+    logger.info('STARTED CUY')
+
+if __name__ == '__main__':
+    main()
+    # app.run(host='0.0.0.0', port=8000)
+
+main()
