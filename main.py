@@ -11,8 +11,8 @@ app = None
 if settings.WEB_STREAM:
     app = Robyn(__name__)
     app.autoblock = None
-    @app.route('/video_feed')
-    def video_feed():
+    @app.route('/stream')
+    def stream():
         if not app.autoblock:
             return Response('No Images for you!')
 

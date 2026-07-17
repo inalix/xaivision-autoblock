@@ -1,0 +1,8 @@
+path: dataset
+train: images/train
+val: images/valid
+test: images/test
+
+# Classes
+names:
+  4: airplane
