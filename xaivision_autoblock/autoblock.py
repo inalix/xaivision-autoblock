@@ -658,6 +658,15 @@ class AutoBlock:
 
                 self.clean_local_images_dir()
 
+            x = (b'--frame\r\n'
+                 b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n\r\n')
+            if self.image_queue.full():
+                try:
+                    self.image_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.image_queue.put(x)
+
     def _start_ffmpeg_process(self, width, height):
         """Spawn subprocess FFmpeg dan simpan ke self.ffmpeg_process."""
         command = [

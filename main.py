@@ -1,6 +1,6 @@
 import time
 
-from robyn import Robyn, Response
+from robyn import Robyn, Response, StreamingResponse, Headers
 
 from xaivision_autoblock.utils import settings
 from xaivision_autoblock.logger import logger
@@ -14,7 +14,7 @@ if settings.WEB_STREAM:
     @app.get('/stream')
     def stream():
         if not app.autoblock:
-            return Response('No Images for you!')
+            return "No Images for you!"
 
         def generate():
             while True:
@@ -23,12 +23,13 @@ if settings.WEB_STREAM:
                     continue
                 yield app.autoblock.image_queue.get()
 
-        return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+        headers = Headers({"Content-Type": "multipart/x-mixed-replace; boundary=frame"})
+        return StreamingResponse(generate(), headers=headers, media_type="multipart/x-mixed-replace; boundary=frame")
 
 
     @app.get('/hello')
     def hello():
-        return Response('OK')
+        return "OK"
 
 def main():
     autoblock = AutoBlock()
