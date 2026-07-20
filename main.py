@@ -41,4 +41,4 @@ def main():
 if __name__ == '__main__':
     main()
     if settings.WEB_STREAM:
-        app.run(host=settings.WEB_STREAM_HOST, port=settings.WEB_STREAM_PORT)
+        app.start(host=settings.WEB_STREAM_HOST, port=settings.WEB_STREAM_PORT)
