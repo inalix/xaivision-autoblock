@@ -84,14 +84,20 @@ def prepare_classes(source_dir):
 
             fixed_lines = []
             for line in lines:
-                cls, *_rest = line.strip().split()
+                line = line.strip()
+                if not line:
+                    continue
+                cls, *_rest = line.split()
                 if int(cls) not in subtitute_classes.keys():
                     fixed_lines.append(line)
                     continue
                 cls = subtitute_classes[int(cls)]
                 fixed_lines.append(f'{cls} {" ".join(_rest)}')
 
-            fixed_lines = '\n'.join(fixed_lines)
+            if fixed_lines:
+                fixed_lines = '\n'.join(fixed_lines)
+            else:
+                fixed_lines = ''
             with open(label_file, 'w') as f:
                 f.write(fixed_lines)
 
