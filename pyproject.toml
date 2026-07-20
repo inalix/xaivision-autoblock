@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "niquests>=3.20.1",
+    "python-dotenv>=1.2.2",
     "robyn>=0.88.0",
     "shapely>=2.1.2",
     "ultralytics>=8.4.95",

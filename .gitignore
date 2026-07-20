@@ -12,3 +12,4 @@ dataset
 runs
 raw_dataset
 xaivision-raw-dataset
+.env

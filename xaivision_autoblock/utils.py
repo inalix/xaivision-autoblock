@@ -1,10 +1,18 @@
 import os
+from pathlib import Path
 from urllib import parse
 
 import cv2
 import numpy as np
-from shapely.geometry import Polygon, box
+from dotenv import load_dotenv
 
+
+# Load .env file if it is not PRODUCTION
+# Karena settings.py ada di dalam subfolder, kita mundur satu langkah ke root
+base_path = Path(__file__).resolve().parent.parent
+env_path = base_path / '.env'
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
 
 SETTINGS_LIST = (
     ('WEB_STREAM', bool, False),
