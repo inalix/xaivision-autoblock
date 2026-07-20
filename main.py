@@ -11,7 +11,7 @@ app = None
 if settings.WEB_STREAM:
     app = Robyn(__name__)
     app.autoblock = None
-    @app.route('/stream')
+    @app.get('/stream')
     def stream():
         if not app.autoblock:
             return Response('No Images for you!')
@@ -26,7 +26,7 @@ if settings.WEB_STREAM:
         return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
-    @app.route('/hello')
+    @app.get('/hello')
     def hello():
         return Response('OK')
 
