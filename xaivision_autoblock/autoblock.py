@@ -469,11 +469,9 @@ class AutoBlock:
     # ------------------------------------------------------------------ #
 
     def _run_yolo_tracking(self, frame):
-        """Preprocessing frame lalu jalankan YOLO .track(). Return results."""
-        frame_height, frame_width = self.orig_shape
-        preprocessed = self.preprocess_frame(frame, frame_width, frame_height)
+        """jalankan YOLO .track(). Return results."""
         return self.model.track(
-            preprocessed,
+            frame,
             conf=self.nms_confidence_threshold,
             iou=self.nms_iou_threshold,
             imgsz=self.model_res[0],
@@ -560,7 +558,7 @@ class AutoBlock:
 
         data_block = {}
         for xyxy, track_id, conf in zip(xyxys, track_ids, confs):
-            x1, y1, x2, y2 = self.scale_bbox_to_original(*xyxy)
+            x1, y1, x2, y2 = xyxy
             bbox = [x1, y1, x2 - x1, y2 - y1]
             event = self._process_tracked_object(bbox, track_id, conf, frame)
             # Ambil event pertama saja — 1 parking stand, maks 1 event per frame
