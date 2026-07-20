@@ -3,7 +3,7 @@ import time
 import cv2
 import queue
 
-from jimbo.logger import logger
+from .logger import logger
 
 
 class CaptureBase:
