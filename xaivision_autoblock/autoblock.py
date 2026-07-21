@@ -27,7 +27,7 @@ from .logger import logger
 utc = ZoneInfo('UTC')
 
 class AutoBlock:
-    tracking_ids = [0]
+    tracking_ids = [4]
     parked_airplanes = {}
     api_session = None
 

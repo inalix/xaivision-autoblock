@@ -17,19 +17,19 @@ if env_path.exists():
 SETTINGS_LIST = (
     ('WEB_STREAM', bool, False),
     ('WEB_STREAM_HOST', str, '0.0.0.0'),
-    ('WEB_STREAM_PORT', int, 8000),
+    ('WEB_STREAM_PORT', int, 8080),
 
     ('VIDEO_PATH', str, '/app/test_videos/1.mp4'),
     ('PARKING_LABEL', str, '001'),
     ('PARKING_POSITION', str, '0,0,200,200'),
     ('DATA_TARGET_URL', str, ''),
-    ('MODEL_PATH', str, '/app/models/v5m_e300.pt'),
+    ('MODEL_PATH', str, '/app/models/production.pt'),
     ('MODEL_RES', str, '640,640'),
     ('TARGET_FPS', int, 3),
     ('STORE_FOOTAGE_IMAGE', bool, False),
     ('STORE_FOOTAGE_VIDEO', bool, False),
     ('STORE_FOOTAGE_VIDEO_SECS', int, 10),
-    ('LOCAL_IMAGES_SAVE', bool, True),
+    ('LOCAL_IMAGES_SAVE', bool, False),
     ('LOCAL_IMAGES_DIR', str, '/app/store_images'),
     ('LOCAL_IMAGES_SECS', int, 1),
     ('SHOW_PARKING_AREA', bool, True),
@@ -75,7 +75,10 @@ class Settings():
 
     def initial_settings(self):
         for s in SETTINGS_LIST:
-            setattr(self, s[0], s[1](os.getenv(s[0], s[2])))
+            value = os.getenv(s[0], s[2])
+            if (type(value) == str):
+                value = value.strip()
+            setattr(self, s[0], s[1](value))
 
 settings = Settings()
 
