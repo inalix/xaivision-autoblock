@@ -10,6 +10,9 @@ dependencies = [
     "robyn>=0.88.0",
     "shapely>=2.1.2",
     "ultralytics>=8.4.95",
+    "torch",
+    "torchvision",
+    "torchaudio",
 ]
 
 [build-system]
@@ -19,6 +22,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["xaivision_autoblock*"]
+
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cu121"]
 
 [dependency-groups]
 dev = [
