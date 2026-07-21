@@ -6,6 +6,7 @@ import argparse
 def prepare_dataset(source_dir, output_dir, train_ratio=0.7, val_ratio=0.3,
              test_ratio=0):
 
+    print(f'Preparing dataset inalix...')
     images_dir = os.path.join(source_dir, "images")
     labels_dir = os.path.join(source_dir, "labels")
     # Make sure output directories exist
@@ -40,6 +41,7 @@ def prepare_dataset(source_dir, output_dir, train_ratio=0.7, val_ratio=0.3,
                 output_dir, "labels", split, os.path.splitext(img)[0] + ".txt")
             
             shutil.copy(img_src, img_dst)
+            print('copying ', img_src)
             if os.path.exists(lbl_src):  # some images might not have labels
                 shutil.copy(lbl_src, lbl_dst)
 
@@ -61,6 +63,7 @@ def yolo_copy(source_dir, output_dir):
             os.makedirs(dest_images_dir, exist_ok=True)
             os.makedirs(dest_labels_dir, exist_ok=True)
             shutil.copy(img_src, dest_images_dir)
+            print('copying ', img_src)
             if os.path.exists(lbl_src):
                 shutil.copy(lbl_src, dest_labels_dir)
     print(f"✅ Done! files copied!")
@@ -117,9 +120,10 @@ if __name__ == "__main__":
 
     if args.no_split:
         yolo_copy(args.source_dir, args.output_dir)
+        # asumsinya kalau punya kita sendiri classnya sudah benar
+        prepare_classes(args.output_dir)
     else:
         prepare_dataset(
             args.source_dir, args.output_dir,
             train_ratio=args.train_ratio, val_ratio=args.val_ratio,
             test_ratio=args.test_ratio)
-    prepare_classes(args.output_dir)
