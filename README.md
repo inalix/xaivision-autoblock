@@ -31,14 +31,14 @@ git clone https://github.com/inalix/xaivision-raw-dataset
 
 # PREPARE DATASET
 # from ROBOFLOW
-python prepare_dataset.py --source_path <path_to_raw_dataset> --output_path <path_to_output_dataset default: dataset> --no-split
+python xaivision_autoblock/prepare_dataset.py --source_path <path_to_raw_dataset> --output_path <path_to_output_dataset default: dataset> --no-split
 # ex
-python prepare_dataset.py --source_path /home/inalix/projects/xaivision-raw-dataset/raw_dataset_autoblock/other/airplane.v5i.yolo26 --output_path ./dataset --no-split
+python xaivision_autoblock/prepare_dataset.py --source_path /home/inalix/projects/xaivision-raw-dataset/raw_dataset_autoblock/other/airplane.v5i.yolo26 --output_path ./dataset --no-split
 
 # from INALIX (Label Studio export)
-python prepare_dataset.py --source_path <path_to_raw_dataset> --output_path <path_to_output_dataset default: dataset>
+python xaivision_autoblock/prepare_dataset.py --source_path <path_to_raw_dataset> --output_path <path_to_output_dataset default: dataset>
 # ex
-python prepare_dataset.py --source_path /home/inalix/projects/xaivision-raw-dataset/raw_dataset_autoblock/inalix/dataset1 --output_path ./dataset
+python xaivision_autoblock/prepare_dataset.py --source_path /home/inalix/projects/xaivision-raw-dataset/raw_dataset_autoblock/inalix/dataset1 --output_path ./dataset
 ```
 
 ## Train Model
