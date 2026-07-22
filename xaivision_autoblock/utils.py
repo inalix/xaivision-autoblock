@@ -37,7 +37,12 @@ SETTINGS_LIST = (
     ('ON_BLOCK_MIN_SECS_ON_BAY', int, 5),
     ('OFF_BLOCK_MAX_OVERLAP', float, 0.05),
     ('ON_BAY_MIN_OVERLAP', float, 0.15),
-    ('AIRPLANE_STAY_STILL_THRESHOLD', float, 3.5),
+    # ini jika pakai threshold by "BBOX"
+    # ('AIRPLANE_STAY_STILL_THRESHOLD', float, 3.5),
+    # ini jika pakai threshold by "OVERLAP"
+    ('AIRPLANE_STAY_STILL_THRESHOLD', float, 0.05),
+    ('AIRPLANE_STAY_STILL_BY', str, 'OVERLAP'),
+    ('AIRPLANE_STAY_STILL_IS_SEQUENTIAL', bool, False),
     ('OUT_OF_BAY_TO_START_OFF_BLOCK', int, 25),
     ('GAP_OVERLAP_CONSIDERED_MOVE', float, 0.09),
 

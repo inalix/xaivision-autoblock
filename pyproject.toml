@@ -13,6 +13,7 @@ dependencies = [
     "torch",
     "torchvision",
     "torchaudio",
+    "lap>=0.5.13",
 ]
 
 [build-system]
@@ -24,7 +25,7 @@ where = ["."]
 include = ["xaivision_autoblock*"]
 
 [tool.uv]
-extra-index-url = ["https://download.pytorch.org/whl/cu121"]
+extra-index-url = ["https://download.pytorch.org/whl/cu124"]
 
 [dependency-groups]
 dev = [

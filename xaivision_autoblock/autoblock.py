@@ -54,6 +54,8 @@ class AutoBlock:
 
         # THRESHOLDS
         self.airplane_stay_still_threshold = settings.AIRPLANE_STAY_STILL_THRESHOLD
+        self.airplane_stay_still_by = settings.AIRPLANE_STAY_STILL_BY
+        self.airplane_stay_still_is_sequential = settings.AIRPLANE_STAY_STILL_IS_SEQUENTIAL
         self.nms_confidence_threshold = settings.NMS_CONFIDENCE_THRESHOLD
         self.nms_iou_threshold = settings.NMS_IOU_THRESHOLD
 
@@ -148,19 +150,27 @@ class AutoBlock:
         # print(f'OVERLAP {overlap_ratio}')
         return overlap_ratio
 
-    def is_still(self, bbox, last_position):
-        x, y, w, h = bbox
+    def is_still(self, last_position, bbox=None, overlap=None):
         last_x, last_y, last_w, last_h = last_position
-
         # logger.info(f'BBOX {bbox}')
         # logger.info(f'LAST BBOX {last_position}')
         threshold = self.airplane_stay_still_threshold
-        gapx = abs((x + w) - (last_x + last_w))
-        gapy = abs((y + h) - (last_y + last_h))
-        logger.info(f'IS STILL GAP {gapx}, {gapy}')
-        if gapx < threshold and gapy < threshold:
-            return True
-
+        if self.airplane_stay_still_by.upper() == 'BBOX':
+            if bbox is None:
+                return False
+            x, y, w, h = bbox
+            gapx = abs((x + w) - (last_x + last_w))
+            gapy = abs((y + h) - (last_y + last_h))
+            logger.info(f'IS STILL GAP {gapx}, {gapy}')
+            if gapx < threshold and gapy < threshold:
+                return True
+        elif self.airplane_stay_still_by.upper() == 'OVERLAP':
+            if not overlap:
+                return False
+            last_overlap = self.get_airplane_bay_overlap(last_position)
+            gapx = abs(overlap - last_overlap)
+            if gapx < threshold:
+                return True
         return False
 
     def get_before_image(self, block_type, filename):
@@ -247,7 +257,7 @@ class AutoBlock:
             logger.info(f"Video converted to H.264: {converted_filename}")
             return converted_filename
 
-        logger.info(f"Failed to convert video to H.264")
+        logger.info('Failed to convert video to H.264')
         return None
 
     def _get_api_session(self):
@@ -355,20 +365,33 @@ class AutoBlock:
             return False
 
         # counting gap after 1 second
-        is_still = self.is_still(bbox, self.parked_airplanes[track_id]['on_bay_last_pos'])
+        is_still = self.is_still(
+            self.parked_airplanes[track_id]['on_bay_last_pos'],
+            bbox,
+            overlap_value,
+        )
         self.parked_airplanes[track_id]['on_bay_start'] = now
         self.parked_airplanes[track_id]['on_bay_last_pos'] = bbox
         logger.info(f'IS STILL {is_still}')
         if not is_still:
-            self.parked_airplanes[track_id]['on_block_still'] = 0
+            if self.airplane_stay_still_is_sequential:
+                # ini sequential harus n detik berhenti total
+                self.parked_airplanes[track_id]['on_block_still'] = 0
+            else:
+                # ini by score jika stay +1 jika tidak -1
+                if self.parked_airplanes[track_id]['on_block_still'] <= 0:
+                    self.parked_airplanes[track_id]['on_block_still'] = 0
+                else:
+                    self.parked_airplanes[track_id]['on_block_still'] -= 1
             return False
 
         self.parked_airplanes[track_id]['on_block_still'] += 1
-        # minimum stay still at n seconds consecutive COUNT AS BLOCK ON
         if self.parked_airplanes[track_id]['on_block_still'] < self.on_block_min_secs_on_bay:
             return False
 
-        if self.parked_airplanes[track_id]['ever_off_bay'] < 5:
+        # ini minimal dalam FPS 1 detik harus off bay atau 5 frame
+        ever_off_bay_limit = min(self.target_fps - 1, 5)
+        if self.parked_airplanes[track_id]['ever_off_bay'] < ever_off_bay_limit:
             # FAKED because ever off bay < 5
             logger.info('FAKED ON BLOCK (ALREADY ON PARKING STAND)')
             self.parked_airplanes[track_id]['on_block_real'] = False
@@ -382,8 +405,6 @@ class AutoBlock:
         return is_still
 
     def process_off_block_data(self, bbox, track_id, frame):
-        send_data_off_block = False
-
         if not self.parked_airplanes[track_id]['on_block']:
             return False
 
