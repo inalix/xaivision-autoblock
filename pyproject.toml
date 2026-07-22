@@ -25,7 +25,7 @@ where = ["."]
 include = ["xaivision_autoblock*"]
 
 [tool.uv]
-extra-index-url = ["https://download.pytorch.org/whl/cu124"]
+extra-index-url = ["https://download.pytorch.org/whl/cu128"]
 
 [dependency-groups]
 dev = [
