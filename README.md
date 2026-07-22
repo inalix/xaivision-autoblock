@@ -45,7 +45,7 @@ python xaivision_autoblock/prepare_dataset.py --source_dir /home/inalix/projects
 ```bash
 # BUKA data-train.yml atau copy data-train.yml dan pastikan path ke dataset sudah benar
 # jalankan perintah ini:
-yolo detect train model=yolo26s.pt data=data-train.yml epochs=300 cache=ram batch=0.90
+yolo detect train model=yolo26s.pt data=data-train.yml epochs=300 cache=ram batch=0.90 name=26s-c
 # model = 26n, 26s, 26m, 26l, 26x
 # data = path to data-train.yml
 # epochs = number of epochs

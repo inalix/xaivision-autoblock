@@ -169,6 +169,7 @@ class AutoBlock:
                 return False
             last_overlap = self.get_airplane_bay_overlap(last_position)
             gapx = abs(overlap - last_overlap)
+            logger.info(f'IS STILL GAP {gapx}')
             if gapx < threshold:
                 return True
         return False

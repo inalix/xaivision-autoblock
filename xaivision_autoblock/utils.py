@@ -41,6 +41,7 @@ SETTINGS_LIST = (
     # ('AIRPLANE_STAY_STILL_THRESHOLD', float, 3.5),
     # ini jika pakai threshold by "OVERLAP"
     ('AIRPLANE_STAY_STILL_THRESHOLD', float, 0.05),
+    # "OVERLAP" untuk overlap bbox dengan bay, "BBOX" untuk overlap bbox dengan latest bbox
     ('AIRPLANE_STAY_STILL_BY', str, 'OVERLAP'),
     ('AIRPLANE_STAY_STILL_IS_SEQUENTIAL', bool, False),
     ('OUT_OF_BAY_TO_START_OFF_BLOCK', int, 25),
