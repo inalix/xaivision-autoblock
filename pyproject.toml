@@ -10,9 +10,8 @@ dependencies = [
     "robyn>=0.88.0",
     "shapely>=2.1.2",
     "ultralytics>=8.4.95",
-    "torch>=2.12.0",        # Compatible with CUDA 13.2 binaries
-    "torchvision>=0.27.0",   # Matches PyTorch 2.12+
-    "torchaudio",
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
     "lap>=0.5.13",
 ]
 
@@ -24,9 +23,29 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["xaivision_autoblock*"]
 
-[tool.uv]
-# Lock the index URL directly to PyTorch's official CUDA 13.2 binary wheel store
-extra-index-url = ["https://download.pytorch.org/whl/cu132"]
+# # --- STATIC MULTI-INDEX LAYOUT ---
+# 1. Define standard PyPI as the global default index for all standard packages (lap, robyn, etc.)
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+# 2. Define the production PyTorch index as an extra search pool
+[[tool.uv.index]]
+name = "pytorch-prod"
+url = "https://download.pytorch.org/whl/cu132"
+
+# 3. Define the RunPod development index as an explicit-only override
+# run with uv sync --index pytorch-runpod-dev
+[[tool.uv.index]]
+name = "pytorch-runpod-dev"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+# Bind your packages directly to the production warehouse registry default
+torch = { index = "pytorch-prod" }
+torchvision = { index = "pytorch-prod" }
 
 [dependency-groups]
 dev = [
