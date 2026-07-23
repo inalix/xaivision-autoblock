@@ -55,7 +55,7 @@ class AutoBlock:
         # THRESHOLDS
         self.airplane_stay_still_threshold = settings.AIRPLANE_STAY_STILL_THRESHOLD
         self.airplane_stay_still_by = settings.AIRPLANE_STAY_STILL_BY
-        self.airplane_stay_still_is_sequential = settings.AIRPLANE_STAY_STILL_IS_SEQUENTIAL
+        self.airplane_stay_still_is_consecutive = settings.AIRPLANE_STAY_STILL_IS_CONSECUTIVE
         self.nms_confidence_threshold = settings.NMS_CONFIDENCE_THRESHOLD
         self.nms_iou_threshold = settings.NMS_IOU_THRESHOLD
 
@@ -375,8 +375,8 @@ class AutoBlock:
         self.parked_airplanes[track_id]['on_bay_last_pos'] = bbox
         logger.info(f'IS STILL {is_still}')
         if not is_still:
-            if self.airplane_stay_still_is_sequential:
-                # ini sequential harus n detik berhenti total
+            if self.airplane_stay_still_is_consecutive:
+                # ini consecutive harus n detik berhenti total
                 self.parked_airplanes[track_id]['on_block_still'] = 0
             else:
                 # ini by score jika stay +1 jika tidak -1
