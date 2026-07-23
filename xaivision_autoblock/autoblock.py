@@ -14,6 +14,7 @@ import cv2
 
 import numpy as np
 
+from sympy import O
 from ultralytics import YOLO
 from ultralytics.utils.torch_utils import select_device
 from shapely.geometry import Polygon
@@ -733,12 +734,22 @@ class AutoBlock:
             if self.ffmpeg_process is None or self.ffmpeg_process.poll() is not None:
                 if self.ffmpeg_process is not None:
                     logger.warning('FFmpeg stream process died, restarting...')
+                    try:
+                        self.ffmpeg_process.stdin.close()
+                        self.ffmpeg_process.wait()
+                    except Exception:
+                        pass
                 self._start_ffmpeg_process(width, height)
 
             try:
                 self.ffmpeg_process.stdin.write(frame.tobytes())
-            except BrokenPipeError:
+                self.ffmpeg_process.stdin.flush()
+            except (BrokenPipeError, OSError):
                 logger.error('FFmpeg stdin broken pipe, will restart on next frame')
+                try:
+                    self.ffmpeg_process.stdin.close()
+                except Exception:
+                    pass
                 self.ffmpeg_process = None
             except Exception as e:
                 logger.error(f'FFmpeg write error: {e}')

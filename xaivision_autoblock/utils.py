@@ -17,7 +17,7 @@ if env_path.exists():
 SETTINGS_LIST = (
     ('WEB_STREAM', bool, False),
     ('WEB_STREAM_HOST', str, '0.0.0.0'),
-    ('WEB_STREAM_PORT', int, 8080),
+    ('WEB_STREAM_PORT', int, 8000),
 
     ('VIDEO_PATH', str, '/app/test_videos/1.mp4'),
     ('PARKING_LABEL', str, '001'),
@@ -82,7 +82,7 @@ class Settings():
     def initial_settings(self):
         for s in SETTINGS_LIST:
             value = os.getenv(s[0], s[2])
-            if (type(value) == str):
+            if type(value) is str:
                 value = value.strip()
             setattr(self, s[0], s[1](value))
 
@@ -133,17 +133,17 @@ def draw_bbox_and_label(frame, bbox, bg_color, size,
         max_width = 0
         max_height = 0
         text_height = 0
-        for l in labels:
+        for lab in labels:
             (text_width, text_height), baseline = cv2.getTextSize(
-                l, cv2.FONT_HERSHEY_SIMPLEX, 0.5, size)
+                lab, cv2.FONT_HERSHEY_SIMPLEX, 0.5, size)
             max_width = max(max_width, text_width)
             max_height += text_height
 
         if bg_color:
             cv2.rectangle(frame, (x1, y1), (x1 + max_width, y1 + max_height + size), bg_color, -1)
 
-        for i, l in enumerate(labels, 1):
-            cv2.putText(frame, l, (x1, y1 + (text_height * i)),
+        for i, lab in enumerate(labels, 1):
+            cv2.putText(frame, lab, (x1, y1 + (text_height * i)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, size)
 
 

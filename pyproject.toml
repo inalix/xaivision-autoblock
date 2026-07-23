@@ -10,8 +10,8 @@ dependencies = [
     "robyn>=0.88.0",
     "shapely>=2.1.2",
     "ultralytics>=8.4.95",
-    "torch",
-    "torchvision",
+    "torch>=2.12.0",        # Compatible with CUDA 13.2 binaries
+    "torchvision>=0.27.0",   # Matches PyTorch 2.12+
     "torchaudio",
     "lap>=0.5.13",
 ]
@@ -25,7 +25,8 @@ where = ["."]
 include = ["xaivision_autoblock*"]
 
 [tool.uv]
-extra-index-url = ["https://download.pytorch.org/whl/cu128"]
+# Lock the index URL directly to PyTorch's official CUDA 13.2 binary wheel store
+extra-index-url = ["https://download.pytorch.org/whl/cu132"]
 
 [dependency-groups]
 dev = [

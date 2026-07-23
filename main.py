@@ -1,6 +1,6 @@
 import time
 
-from robyn import Robyn, Response, StreamingResponse, Headers
+from robyn import Robyn, StreamingResponse, Headers
 
 from xaivision_autoblock.utils import settings
 from xaivision_autoblock.logger import logger
